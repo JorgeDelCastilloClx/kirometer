@@ -14,8 +14,8 @@ Lambda kiro-usage-ingest (Python 3.13, private subnets)
                      |  TLS verify-full
                      v
 RDS PostgreSQL 18 (private, encrypted) <-- read-only role -- Managed Grafana 13.2
-                                                               | dashboard + 4 alert rules
-                                                               v  delivered 07:00 UTC on the 28th (monthly)
+                                                               | dashboard + alert digests
+                                                               v  07:00 UTC: weekly / month end / reset day
                                                      SNS (VPC endpoint) --> e-mail
 ```
 
@@ -73,7 +73,8 @@ cp config/example.tfvars config/team-a.tfvars   # git-ignored
 | `alert_emails` | Usage alerts. Each address gets an SNS confirmation mail first. |
 | `ops_emails` | Pipeline alerts: ingest errors, schedule not running, data older than two days |
 | `interface_endpoint_services` | Set to `[]` if the VPC already has Secrets Manager and SNS endpoints or a NAT gateway |
-| `ignore_tag_prefixes` | Tag prefixes set by automation outside OpenTofu (e.g. a backup policy); OpenTofu leaves them alone |
+| `ignore_tag_prefixes` | Tag prefixes set by automation outside OpenTofu (e.g. a backup policy); OpenTofu leaves them alone. An organisation AWS Backup policy that enrols the database by tag typically needs `["Backup", "OrgBackup"]` or similar. Backup retention and window are only set at creation; later changes by such a policy are left alone. |
+| `tier_model` | Reactive tier model: `reset_tier` (default PRO), `billing_discount_pct` (discount on the whole Kiro bill, e.g. an AWS EDP; default 0), safe-to-lower day and margin, trend ratios, heavy-Opus thresholds. All optional; see `config/example.tfvars`. Written to the `settings` table by every ingest run. |
 
 The state bucket (`<name_prefix>-tofu-state-<account>-<region>`) and the KMS
 key aliases are derived from these values.
@@ -94,9 +95,29 @@ The bootstrap state stays local in `config/team-a.bootstrap.tfstate`
 
 Afterwards:
 
-1. Confirm the SNS e-mail subscriptions (one mail per address and topic).
+1. Confirm the SNS e-mail subscriptions: one "Subscription Confirmation" mail
+   per address and topic. The link must be clicked within three days, or SNS
+   drops the subscription and alerts are published to nobody. Check with
+   `aws sns list-subscriptions-by-topic` that none is `PendingConfirmation`;
+   re-apply the platform to re-create lapsed ones.
 2. Open the `grafana_url` from the platform-apply output and sign in with IAM Identity Center.
-3. In Grafana, *Alerting -> Contact points -> kiro-finops -> Test*. If no mail arrives, add `"sts"` to `interface_endpoint_services` and re-apply the platform.
+3. In Grafana, *Alerting -> Contact points -> kiro-finops -> Test*, and the same for `kiro-ops`. If no mail arrives, add `"sts"` to `interface_endpoint_services` and re-apply the platform.
+
+## Delivery schedule
+
+Rules are evaluated every 10 minutes; mails are only sent inside their
+windows (07:00-07:15 UTC by default, after the 06:30 import):
+
+| Digest | Window | Repeats |
+|---|---|---|
+| Raise before month end | Mondays, and daily from the 22nd | at every window while users are listed |
+| Safe to lower now | Mondays from the 15th | at every window |
+| Lower before reset | The 22nd | monthly |
+| Heavy Opus use | Daily, one mail per user | when a case starts; a reminder after 7 days if it continues |
+
+Usage digests send no "resolved" mails. Weekday, days and times are variables
+of the grafana module. Silence a user after talking to them: *Alerting ->
+Silences*, matcher `user_label`, with a comment and end date.
 
 If the bucket uses SSE-KMS, set `source_kms_key_arn` on the platform module
 and allow the ingest role in the key policy.
@@ -108,7 +129,8 @@ and allow the ingest role in the key policy.
 | Re-import older months | `aws lambda invoke --function-name kiro-usage-ingest --payload '{"backfill_months": 12}' --cli-binary-format raw-in-base64-out /dev/stdout` |
 | Re-read every file | payload `{"force": true}` |
 | Add or remove people | edit `config/<env>.tfvars`; `make ENV=<env> platform-plan platform-apply` |
-| Change prices or thresholds | new migration `V002__...sql` updating `plans`; `make ENV=<env> platform-plan platform-apply` |
+| Change prices | new migration `V###__...sql` updating `plans`; `make ENV=<env> platform-plan platform-apply` |
+| Change the reset plan, discount or alert thresholds | edit `tier_model` in `config/<env>.tfvars`; `make ENV=<env> platform-plan platform-apply`; the next ingest writes them |
 | Change a view | edit `R__views.sql`; rebuild and apply the platform; the next run re-applies it |
 | Change dashboards | edit `infra/modules/kiro-usage-grafana/dashboards/*.json`; `make ENV=<env> grafana-plan grafana-apply` |
 | Rotate the Grafana DB password | increase `reader_password_version` on the platform module; apply platform; `make ingest`; apply grafana |

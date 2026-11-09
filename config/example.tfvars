@@ -42,3 +42,18 @@ grafana_viewer_emails = ["manager@example.com"]
 
 alert_emails = ["finops@example.com"]
 ops_emails   = ["platform-team@example.com"]
+
+# --- Reactive tier model -------------------------------------------------------
+# Everyone starts the month on reset_tier and is raised when actual usage makes
+# a higher tier cheaper. Every key is optional; these are the defaults.
+tier_model = {
+  reset_tier             = "PRO"
+  billing_discount_pct   = 0 # discount on the whole Kiro bill (e.g. an AWS EDP), if any
+  safe_to_lower_from_day = 15
+  safe_to_lower_margin   = 0.8
+  quiet_ratio            = 0.7
+  busy_ratio             = 1.3
+  opus_window_days       = 2
+  opus_min_credits       = 750
+  opus_min_share         = 0.8
+}

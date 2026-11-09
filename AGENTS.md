@@ -35,9 +35,10 @@ deployment reference is [infra/README.md](infra/README.md).
 | `src/ingest/kiro_ingest/store.py` | Upserts, SCRAM verifier, read-only role and grants |
 | `src/ingest/kiro_ingest/migrate.py` | Migration runner |
 | `src/ingest/kiro_ingest/migrations/V###__*.sql` | Versioned schema; applied once, never edited |
-| `src/ingest/kiro_ingest/migrations/R__views.sql` | All views and functions; dropped and recreated when the file changes |
+| `src/ingest/kiro_ingest/migrations/R__views.sql` | All views and functions; dropped and recreated when the file changes. Tier logic for panels and alerts lives here (`v_current_status`, `v_expected_usage`, `v_month_glance`, `v_alert_*`) |
+| `src/ingest/kiro_ingest/migrations/V002__tier_model.sql` | `settings`: one row of reactive tier model settings, written from `TIER_MODEL_JSON` on every run |
 | `src/ingest/kiro_ingest/handler.py` | Lambda entry point (env vars documented in its docstring) |
-| `src/ingest/tests/` | pytest; DB tests need `PG*` env vars and skip otherwise |
+| `src/ingest/tests/` | pytest; DB tests need `PG*` env vars and skip otherwise. `test_grafana_queries.py` runs every dashboard and alert query as the reader role |
 | `scripts/build_lambda.py` | Deterministic arm64 / Python 3.13 zip into `build/` |
 | `scripts/with-grafana-token.sh` | Runs a command with a 1-hour Grafana token in `GRAFANA_AUTH`, deleted afterwards |
 | `infra/modules/*` | Reusable modules; no deployment-specific values |
@@ -78,8 +79,19 @@ early evaluation), so a bare `tofu init` without the var file fails.
 - Kiro only lists active users. Downgrade logic therefore also looks at the
   previous month to find people with no usage this month.
 - A mid-month plan change leaves several tiers in a month; the newest row wins.
-- `plans` holds list prices and the derived forecast thresholds. Change
-  prices with a new `V###` migration, never by editing `V001`.
+- `plans` holds list prices and the derived thresholds (raise point =
+  included + threshold). Change prices with a new `V###` migration, never by
+  editing `V001`.
+- Reactive tier model: everyone starts the month on `settings.reset_tier`,
+  is raised when actual usage makes a higher tier cheaper (an upgrade
+  recalculates the whole month), and is lowered before the next month (a
+  downgrade applies next month). Raise decisions use list prices; the
+  `billing_discount_pct` only scales dollar figures.
+- `settings` is a single row. Deployment values come from `tier_model` in
+  `config/<env>.tfvars` via `TIER_MODEL_JSON`; never put a deployment's
+  discount or thresholds into a migration.
+- Dollar figures are estimates (list prices, discount, seats prorated from
+  `users.first_seen` in the current month). There is no billing import.
 
 ## Invariants and known pitfalls
 
@@ -101,10 +113,19 @@ These each cost a debugging round; don't reintroduce them.
 - **The RDS master user is not a superuser.** No `ALTER ROLE ... SUPERUSER`
   clauses, not even `NOSUPERUSER`. Tests cover this with a non-superuser
   fixture (`rds_like_db`).
-- **Views run functions with the caller's rights.** `plan_cost()` is
-  `SECURITY DEFINER` with a pinned `search_path` so the read-only role does not
-  need table access. Any new function used in a view needs the same, and the
-  reader test queries every `v_*` view to catch it.
+- **Views run functions with the caller's rights.** `plan_cost()` and
+  `cheapest_tier()` are `SECURITY DEFINER` with a pinned `search_path` so the
+  read-only role does not need table access. Any new function used in a view
+  needs the same, and the reader test queries every `v_*` view to catch it.
+- **Removed views stay in the `DROP VIEW` list** of `R__views.sql`, or they
+  survive on deployed databases and keep their reader grant.
+- **Alert views return exactly one numeric column, `value`.** Grafana turns
+  string columns into labels; display numbers are formatted as text in SQL.
+  `test_grafana_queries.py` checks this.
+- **SNS message templates:** the message goes into the contact point's
+  `settings` map (`message`), like `topic_arn`; the subject goes into the
+  provider's `subject` attribute (it is read back there, so putting it in
+  `settings` shows a change on every plan). Grafana stores 7 days as `1w`.
 - **The reader role is granted per view.** `R__views.sql` drops views, which
   drops grants; the Lambda re-grants all `v_*` views on every run. Reporting
   objects must be named `v_*`.
@@ -114,7 +135,8 @@ These each cost a debugging round; don't reintroduce them.
 - **Tags set by outside automation** (e.g. a backup policy) must be listed in
   `ignore_tag_prefixes`, or applies keep removing them.
 - **Alert evaluation vs. delivery:** rules evaluate every 10 minutes; delivery
-  is restricted by the `kiro-report-windows` time interval. Evaluating
+  is restricted by the `kiro-raise-windows`, `kiro-lower-windows`,
+  `kiro-reset-window` and `kiro-daily-window` time intervals. Evaluating
   hourly risks sending results computed before the 06:30 import.
 - **Plan files are encrypted** with the stack's KMS key; read them with
   `tofu show`, not by unzipping.
