@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from .migrate import apply_migrations
 from .parse import Batch
 from .source import Source, months_back
-from .store import ensure_reader_role, upsert_batch
+from .store import apply_settings, ensure_reader_role, upsert_batch
 
 log = logging.getLogger("kiro_ingest")
 
@@ -27,6 +27,9 @@ class RunConfig:
     reader_role: str | None = None
     reader_password: str | None = field(default=None, repr=False)
     today: date | None = None
+    # Tier-model settings from the deployment configuration; None leaves the
+    # stored row unchanged.
+    settings: dict | None = None
 
 
 def run(conn, source: Source, cfg: RunConfig) -> dict:
@@ -45,6 +48,9 @@ def run(conn, source: Source, cfg: RunConfig) -> dict:
         return {"status": "skipped", "reason": "another run holds the lock"}
     try:
         applied = apply_migrations(conn)
+
+        if cfg.settings is not None:
+            apply_settings(conn, cfg.settings)
 
         views_granted = None
         if cfg.reader_role and cfg.reader_password:
@@ -77,6 +83,7 @@ def run(conn, source: Source, cfg: RunConfig) -> dict:
         result = {
             "status": "ok",
             "migrations_applied": applied,
+            "settings_applied": cfg.settings is not None,
             "reader_views_granted": views_granted,
             "months": [f"{y:04d}-{m:02d}" for y, m in months],
             "files_listed": len(listed),

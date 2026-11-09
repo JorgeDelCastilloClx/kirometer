@@ -73,4 +73,6 @@ module "platform" {
 
   alert_email_subscriptions = var.alert_emails
   ops_email_subscriptions   = var.ops_emails
+
+  tier_model = var.tier_model
 }

@@ -3,7 +3,7 @@
 
 locals {
   topics = {
-    alerts = "Kiro usage alerts (upgrade, overshoot, downgrade)"
+    alerts = "Kiro usage alerts (raise, lower, model use)"
     ops    = "Kiro pipeline alerts (ingest errors, stale data)"
   }
 }

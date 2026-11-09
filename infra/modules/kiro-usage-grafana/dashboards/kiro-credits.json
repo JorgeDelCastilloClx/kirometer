@@ -856,6 +856,53 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Plan %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 75
+                    },
+                    {
+                      "color": "red",
+                      "value": 100
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "max",
+                "value": 200
+              }
+            ]
           }
         ]
       },
@@ -863,7 +910,7 @@
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "Usage %",
+            "displayName": "Plan %",
             "desc": true
           }
         ]
@@ -878,7 +925,612 @@
             "type": "grafana-postgresql-datasource",
             "uid": "kiro-usage"
           },
-          "rawSql": "SELECT user_label AS \"User\",\n       string_agg(DISTINCT subscription_tier, ', ' ORDER BY subscription_tier) AS \"Subscription\",\n       string_agg(DISTINCT client_type, ', ' ORDER BY client_type) AS \"Type\",\n       sum(credits_used) AS \"Credits\",\n       sum(total_messages) AS \"Messages\",\n       sum(chat_conversations) AS \"Conversations\",\n       sum(overage_credits_used) AS \"Overage Credits\",\n       max(overage_cap) AS \"Overage Cap\",\n       bool_or(overage_enabled) AS \"Overage Enabled\",\n       -- Latest limit, not the maximum: a mid-month tier change must not\n       -- leave the old limit in place.\n       (array_agg(usage_limit ORDER BY usage_date DESC)\n            FILTER (WHERE usage_limit IS NOT NULL))[1] AS \"Usage Limit\",\n       round(100 * sum(credits_used)\n             / NULLIF((array_agg(usage_limit ORDER BY usage_date DESC)\n                       FILTER (WHERE usage_limit IS NOT NULL))[1], 0), 1) AS \"Usage %\",\n       count(DISTINCT usage_date) AS \"Active Days\"\nFROM v_usage_daily\nWHERE $__timeFilter(usage_date)\n  AND client_type IN (${client_type:sqlstring})\n  AND user_label IN (${user:sqlstring})\n  AND subscription_tier IN (${subscription:sqlstring})\nGROUP BY 1\nORDER BY \"Usage %\" DESC NULLS LAST, 4 DESC"
+          "rawSql": "WITH u AS (\nSELECT user_label AS \"User\",\n       (array_agg(subscription_tier ORDER BY usage_date DESC)\n            FILTER (WHERE subscription_tier IS NOT NULL))[1] AS latest_tier,\n       string_agg(DISTINCT subscription_tier, ', ' ORDER BY subscription_tier) AS \"Subscription\",\n       string_agg(DISTINCT client_type, ', ' ORDER BY client_type) AS \"Type\",\n       sum(credits_used) AS \"Credits\",\n       sum(total_messages) AS \"Messages\",\n       sum(chat_conversations) AS \"Conversations\",\n       sum(overage_credits_used) AS \"Overage Credits\",\n       max(overage_cap) AS \"Overage Cap\",\n       bool_or(overage_enabled) AS \"Overage Enabled\",\n       -- Latest limit, not the maximum: a mid-month tier change must not\n       -- leave the old limit in place.\n       (array_agg(usage_limit ORDER BY usage_date DESC)\n            FILTER (WHERE usage_limit IS NOT NULL))[1] AS \"Usage Limit\",\n       round(100 * sum(credits_used)\n             / NULLIF((array_agg(usage_limit ORDER BY usage_date DESC)\n                       FILTER (WHERE usage_limit IS NOT NULL))[1], 0), 1) AS \"Usage %\",\n       count(DISTINCT usage_date) AS \"Active Days\"\nFROM v_usage_daily\nWHERE $__timeFilter(usage_date)\n  AND client_type IN (${client_type:sqlstring})\n  AND user_label IN (${user:sqlstring})\n  AND subscription_tier IN (${subscription:sqlstring})\nGROUP BY 1\n)\nSELECT u.\"User\", u.\"Subscription\", u.\"Type\", u.\"Credits\", u.\"Messages\", u.\"Conversations\",\n       u.\"Overage Credits\", u.\"Overage Cap\", u.\"Overage Enabled\", u.\"Usage Limit\", u.\"Usage %\",\n       -- Plan %: credits against the tier's included credits only; above 100%\n       -- once a user is into overage.\n       round(100 * u.\"Credits\" / NULLIF(p.included_credits, 0), 1) AS \"Plan %\",\n       u.\"Active Days\"\nFROM u LEFT JOIN v_plans p ON p.tier = u.latest_tier\nORDER BY \"Plan %\" DESC NULLS LAST, u.\"Credits\" DESC"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "kiro-usage"
+      },
+      "description": "Current calendar month, all users. Dollar figures are estimates at list prices with the configured discount (seats prorated from first use); the actual bill is in the Cost Explorer console. Raises: a higher tier is already cheaper at actual usage. Expected: the projection says a raise will be needed later this month. To lower: above the reset tier for next month.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#ad46ff",
+            "mode": "fixed"
+          },
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bill on current tiers (est.)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Saving this month if raised"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Users to raise now"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "More expected by month end"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "To lower before reset"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "id": 21,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.2.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "kiro-usage"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(sum(bill_estimate_net), 0)    AS \"Bill on current tiers (est.)\",\n       COALESCE(sum(users_to_raise), 0)       AS \"Users to raise now\",\n       COALESCE(sum(saving_if_raised_net), 0) AS \"Saving this month if raised\",\n       COALESCE(sum(expected_raises), 0)      AS \"More expected by month end\",\n       COALESCE(sum(users_to_lower), 0)       AS \"To lower before reset\"\nFROM v_month_glance",
+          "refId": "A"
+        }
+      ],
+      "title": "This month at a glance",
+      "type": "stat"
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "Current status (actual usage, no projection)",
+      "description": "Current calendar month, actual credits only. Plan % = credits used against the tier's included credits. Action: raise = a higher tier is already cheaper (Raise To may skip tiers; an upgrade recalculates the whole month); overage (ok) = past the plan limit but still cheaper to stay (below Raise At); at max = top tier; inactive = no usage this month, the tier shown may be stale. Lowering is not a mid-month action: Reset To is next month's tier. Dollar figures are estimates with the configured discount.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "kiro-usage"
+      },
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Plan %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 85
+                    },
+                    {
+                      "color": "red",
+                      "value": 100
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "max",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost Now $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Saving This Month $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Action"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "raise": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "overage (ok)": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "at max": {
+                        "color": "blue",
+                        "index": 2
+                      },
+                      "stay": {
+                        "color": "green",
+                        "index": 3
+                      },
+                      "inactive": {
+                        "color": "#8e8e9e",
+                        "index": 4
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last Active"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {}
+                  },
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": ".*tier may be stale.*",
+                      "result": {
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Plan %",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "kiro-usage"
+          },
+          "rawSql": "SELECT user_label AS \"User\",\n       tier AS \"Current Tier\",\n       credits_mtd AS \"Credits MTD\",\n       included_credits AS \"Plan Limit\",\n       plan_pct AS \"Plan %\",\n       over_plan AS \"Over Plan\",\n       raise_at_credits AS \"Raise At\",\n       cost_now_net AS \"Cost Now $\",\n       action AS \"Action\",\n       raise_to AS \"Raise To\",\n       saving_this_month_net AS \"Saving This Month $\",\n       to_char(last_active, 'YYYY-MM-DD')\n         || CASE WHEN active_this_month THEN '' ELSE ' (tier may be stale)' END AS \"Last Active\",\n       reset_to AS \"Reset To\"\nFROM v_current_status\nWHERE user_label IN (${user:sqlstring})\n  AND tier IN (${subscription:sqlstring})\nORDER BY plan_pct DESC NULLS LAST, credits_mtd DESC"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "table",
+      "title": "Heavy Opus use (last report days)",
+      "description": "Same rule as the heavy-Opus alert: Opus at or above the configured share of a user's messages and estimated credits over the last report days. Opus is allowed; this is a prompt to check whether it is intended. Superseded = a newer Opus version is in use by someone. Credits per model are estimates; usage under auto is not broken down by Kiro.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "kiro-usage"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Superseded"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "yes": {
+                        "color": "orange",
+                        "index": 0
+                      },
+                      "no": {
+                        "color": "text",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Est. Credits",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "kiro-usage"
+          },
+          "rawSql": "SELECT user_label AS \"User\", model AS \"Model\", superseded AS \"Superseded\",\n       newest_opus AS \"Newest Opus\", opus_share AS \"Opus Share\", messages AS \"Messages\",\n       credits_est AS \"Est. Credits\", window_days AS \"Window\"\nFROM v_alert_heavy_opus\nWHERE user_label IN (${user:sqlstring})\nORDER BY value DESC"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "table",
+      "title": "Expected usage (projection)",
+      "description": "Where each user is heading this month: credits so far plus the 7-day daily average over the remaining days. Raise Expected: next batch = will need a raise later this month; raise straight to = already in the raise list and heading for a higher tier still. Trend compares the projection with last month (complete months only). Lower: safe now = from mid-month, the projection stays well below the tier's raise point, so the downgrade can be requested already (it applies next month); at reset = request before the reset.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "kiro-usage"
+      },
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 67
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trend"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "quiet": {
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "busy": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "normal": {
+                        "color": "text",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Raise Expected"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "next batch": {
+                        "color": "orange",
+                        "index": 0
+                      },
+                      "in raise list": {
+                        "color": "red",
+                        "index": 1
+                      },
+                      "no": {
+                        "color": "#8e8e9e",
+                        "index": 2
+                      }
+                    }
+                  },
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": "raise straight to.*",
+                      "result": {
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Lower"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "safe now": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "at reset": {
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "-": {
+                        "color": "#8e8e9e",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Projected Month-End",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "kiro-usage"
+          },
+          "rawSql": "SELECT user_label AS \"User\",\n       tier AS \"Current Tier\",\n       credits_mtd AS \"Credits MTD\",\n       avg_daily_7d AS \"Avg / Day (7d)\",\n       projected_month_end AS \"Projected Month-End\",\n       credits_prev_month AS \"Last Month\",\n       trend AS \"Trend\",\n       trend_pct AS \"Trend %\",\n       needed_by_month_end AS \"Needed By Month End\",\n       raise_expected AS \"Raise Expected\",\n       lower AS \"Lower\",\n       reset_to AS \"Reset To\"\nFROM v_expected_usage\nWHERE user_label IN (${user:sqlstring})\n  AND tier IN (${subscription:sqlstring})\nORDER BY projected_month_end DESC"
         }
       ]
     }

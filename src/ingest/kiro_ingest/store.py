@@ -146,3 +146,42 @@ def ensure_reader_role(conn, role: str, password: str) -> int:
         for view in views:
             conn.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(sql.Identifier(view), ident))
     return len(views)
+
+
+# Columns of the single settings row and how to convert configured values.
+# The database CHECK constraints validate the ranges.
+SETTINGS_COLUMNS = {
+    "reset_tier": str,
+    "billing_discount_pct": float,
+    "safe_to_lower_from_day": int,
+    "safe_to_lower_margin": float,
+    "quiet_ratio": float,
+    "busy_ratio": float,
+    "opus_window_days": int,
+    "opus_min_credits": float,
+    "opus_min_share": float,
+}
+
+
+def apply_settings(conn, settings: dict) -> None:
+    """Write the tier-model settings row from the deployment configuration.
+
+    Only the keys given are changed; the others keep their current values.
+    Unknown keys are rejected so a typo in the configuration fails loudly
+    instead of being ignored. Null values are skipped (an optional setting
+    that was not configured).
+    """
+    unknown = sorted(set(settings) - set(SETTINGS_COLUMNS))
+    if unknown:
+        raise ValueError(f"unknown tier-model settings: {', '.join(unknown)}")
+    values = {k: SETTINGS_COLUMNS[k](v) for k, v in settings.items() if v is not None}
+    if not values:
+        return
+    assignments = sql.SQL(", ").join(
+        sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder(k)) for k in values
+    )
+    with conn.transaction():
+        conn.execute(
+            sql.SQL("UPDATE settings SET {}, updated_at = now() WHERE id").format(assignments),
+            values,
+        )

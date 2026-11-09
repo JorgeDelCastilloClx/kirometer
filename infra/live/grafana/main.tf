@@ -44,6 +44,8 @@ module "grafana" {
 
   alerts_topic_arn = local.platform.alerts_topic_arn
   ops_topic_arn    = local.platform.ops_topic_arn
+
+  safe_to_lower_from_day = var.tier_model.safe_to_lower_from_day
 }
 
 output "dashboard_urls" {

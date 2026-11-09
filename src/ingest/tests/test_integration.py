@@ -12,6 +12,9 @@ from kiro_ingest.store import scram_sha256_verifier
 
 from conftest import ACCOUNT, report_csv, report_key
 
+# Reporting views created by R__views.sql (all granted to the reader role).
+VIEW_COUNT = 14
+
 
 class MemorySource:
     def __init__(self, files: dict[str, str], etags: dict[str, str] | None = None):
@@ -48,7 +51,7 @@ def test_scram_verifier_format_is_deterministic_with_fixed_salt():
 class TestMigrations:
     def test_fresh_apply_then_idempotent(self, fresh_db):
         first = apply_migrations(fresh_db)
-        assert first == ["V001__core.sql", "R__views.sql"]
+        assert first == ["V001__core.sql", "V002__tier_model.sql", "R__views.sql"]
         assert apply_migrations(fresh_db) == []
         thresholds = dict(fresh_db.execute(
             "SELECT tier, overshoot_threshold_credits FROM plans").fetchall())
@@ -116,24 +119,25 @@ class TestRun:
             "SELECT sum(credits_used) FROM usage_daily WHERE account_id = %s", (ACCOUNT,)).fetchone()[0]
         assert int(total) == 100 + 900 + 10 + 650
 
-    def test_views_compute_month_rollup_and_forecast(self, fresh_db):
+    def test_views_compute_month_rollup_and_projection(self, fresh_db):
         run(fresh_db, MemorySource(_files()), RunConfig(today=date(2026, 10, 3)))
         u1 = fresh_db.execute(
             """SELECT credits_mtd, subscription_tier, included_credits, utilization_pct
                FROM v_usage_monthly WHERE user_id = 'u-1' AND month = '2026-10-01'""").fetchone()
         assert (int(u1[0]), u1[1], u1[2], float(u1[3])) == (1600, "PRO", 1000, 160.0)
 
-        fc = fresh_db.execute(
-            """SELECT avg_daily_7d, days_remaining, projected_month_end, threshold_credits
-               FROM v_alert_overage_forecast WHERE user_label = 'a@example.com'""").fetchone()
-        # 7-day window ending Oct 2 holds Sep 30 + Oct 1 + Oct 2 = 1700 credits.
-        assert float(fc[0]) == pytest.approx(1700 / 7, abs=0.05)
-        assert fc[1] == 29
-        assert int(fc[3]) == 500
+        ex = fresh_db.execute(
+            """SELECT avg_daily_7d, projected_month_end FROM v_expected_usage
+               WHERE user_label = 'a@example.com'""").fetchone()
+        # 7-day window ending Oct 2 holds Sep 30 + Oct 1 + Oct 2 = 1700 credits;
+        # 29 days remain.
+        assert float(ex[0]) == pytest.approx(1700 / 7, abs=0.05)
+        assert float(ex[1]) == pytest.approx(1600 + 1700 / 7 * 29, abs=0.1)
 
-        upgrade = fresh_db.execute(
-            "SELECT next_tier FROM v_alert_tier_upgrade WHERE user_label = 'a@example.com'").fetchone()
-        assert upgrade == ("PRO_PLUS",)
+        # 1,600 credits on PRO: $44 vs $40 on PRO_PLUS.
+        cs = fresh_db.execute(
+            "SELECT action, raise_to FROM v_current_status WHERE user_label = 'a@example.com'").fetchone()
+        assert cs == ("raise", "PRO_PLUS")
 
         fresh = fresh_db.execute("SELECT latest_report_date FROM v_data_freshness").fetchone()
         assert fresh[0] == date(2026, 10, 2)
@@ -153,7 +157,7 @@ class TestRun:
     def test_reader_role_sees_views_only(self, reader_role, fresh_db):
         cfg = RunConfig(today=date(2026, 10, 3), reader_role=reader_role, reader_password="Reader-Pass-123")
         result = run(fresh_db, MemorySource(_files()), cfg)
-        assert result["reader_views_granted"] == 8
+        assert result["reader_views_granted"] == VIEW_COUNT
 
         info = fresh_db.info
         with psycopg.connect(host=info.host, port=info.port, dbname=info.dbname,
@@ -164,9 +168,12 @@ class TestRun:
             views = [r[0] for r in fresh_db.execute(
                 "SELECT table_name FROM information_schema.views "
                 "WHERE table_schema = 'public' AND table_name LIKE 'v\\_%'").fetchall()]
-            assert len(views) == 8
+            assert len(views) == VIEW_COUNT
             for view in views:
                 ro.execute(f"SELECT * FROM {view}").fetchall()
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                ro.execute("SELECT * FROM settings")
+            ro.rollback()
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 ro.execute("SELECT count(*) FROM usage_daily")
             ro.rollback()
@@ -197,10 +204,10 @@ def test_full_run_as_non_superuser_like_rds(rds_like_db):
     conn, reader = rds_like_db
     cfg = RunConfig(today=date(2026, 10, 3), reader_role=reader, reader_password="Reader-Pass-123")
     first = run(conn, MemorySource(_files()), cfg)
-    assert first["status"] == "ok" and first["reader_views_granted"] == 8
+    assert first["status"] == "ok" and first["reader_views_granted"] == VIEW_COUNT
     # Second run takes the ALTER ROLE path for the now-existing role.
     second = run(conn, MemorySource(_files()), cfg)
-    assert second["status"] == "ok" and second["reader_views_granted"] == 8
+    assert second["status"] == "ok" and second["reader_views_granted"] == VIEW_COUNT
     attrs = conn.execute(
         "SELECT rolsuper, rolcreatedb, rolcreaterole, rolcanlogin FROM pg_roles WHERE rolname = %s",
         (reader,)).fetchone()

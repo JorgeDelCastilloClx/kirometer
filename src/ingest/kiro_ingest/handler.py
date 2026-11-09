@@ -11,6 +11,8 @@ Environment:
   SOURCE_ACCOUNT_ID             account whose reports to read
   SOURCE_REGIONS                comma-separated Kiro profile regions
   LOOKBACK_MONTHS               default 2 (current and previous month)
+  TIER_MODEL_JSON               optional JSON object with tier-model settings
+                                (keys: see store.SETTINGS_COLUMNS)
 
 Event (all optional): {"backfill_months": 12, "force": true}
 """
@@ -66,11 +68,13 @@ def _connect() -> psycopg.Connection:
 def lambda_handler(event, context):
     event = event or {}
     reader_secret = os.environ.get("READER_SECRET_ARN")
+    tier_model = os.environ.get("TIER_MODEL_JSON")
     cfg = RunConfig(
         lookback_months=int(event.get("backfill_months") or os.environ.get("LOOKBACK_MONTHS", "2")),
         force=bool(event.get("force", False)),
         reader_role=os.environ.get("READER_ROLE"),
         reader_password=_secret(reader_secret) if reader_secret else None,
+        settings=json.loads(tier_model) if tier_model else None,
     )
     source = S3Source(
         _s3,

@@ -129,7 +129,7 @@ variable "grafana_viewer_emails" {
 }
 
 variable "alert_emails" {
-  description = "Receive usage alerts (upgrade, overshoot, downgrade). Each address must confirm the SNS subscription."
+  description = "Receive usage alerts (raise, lower, heavy Opus use). Each address must confirm the SNS subscription."
   type        = list(string)
   default     = []
 }
@@ -138,4 +138,48 @@ variable "ops_emails" {
   description = "Receive pipeline alerts (ingest errors, schedule not running, stale data)."
   type        = list(string)
   default     = []
+}
+
+# --- Reactive tier model ------------------------------------------------------
+# Everyone starts the month on reset_tier and is raised when actual usage
+# makes a higher tier cheaper. Written to the database by every ingest run, so
+# dashboard panels and alert rules use the same values.
+
+variable "tier_model" {
+  description = "Reactive tier model settings. The defaults suit any deployment (list prices, reset to PRO)."
+  type = object({
+    reset_tier             = optional(string, "PRO") # tier every user returns to for the next month
+    billing_discount_pct   = optional(number, 0)     # discount on the whole Kiro bill, e.g. an AWS EDP; 0 = list prices
+    safe_to_lower_from_day = optional(number, 15)    # "safe to lower now" from this day of the month
+    safe_to_lower_margin   = optional(number, 0.8)   # ... when the projection stays below margin x the tier's raise point
+    quiet_ratio            = optional(number, 0.7)   # projection / last month below this: quiet month
+    busy_ratio             = optional(number, 1.3)   # above this: busy month
+    opus_window_days       = optional(number, 2)     # heavy Opus use: last N report days ...
+    opus_min_credits       = optional(number, 750)   # ... at least this many estimated Opus credits ...
+    opus_min_share         = optional(number, 0.8)   # ... and at least this share of the user's messages
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["PRO", "PRO_PLUS", "PRO_MAX", "POWER"], var.tier_model.reset_tier)
+    error_message = "reset_tier must be PRO, PRO_PLUS, PRO_MAX or POWER."
+  }
+  validation {
+    condition     = var.tier_model.billing_discount_pct >= 0 && var.tier_model.billing_discount_pct < 100
+    error_message = "billing_discount_pct is a percentage between 0 and 100."
+  }
+  validation {
+    condition     = var.tier_model.safe_to_lower_from_day >= 1 && var.tier_model.safe_to_lower_from_day <= 28
+    error_message = "safe_to_lower_from_day must be between 1 and 28."
+  }
+  validation {
+    condition = (
+      var.tier_model.safe_to_lower_margin > 0 && var.tier_model.safe_to_lower_margin <= 1 &&
+      var.tier_model.quiet_ratio > 0 && var.tier_model.quiet_ratio < 1 && var.tier_model.busy_ratio > 1 &&
+      var.tier_model.opus_min_share > 0 && var.tier_model.opus_min_share <= 1 &&
+      var.tier_model.opus_min_credits > 0 &&
+      var.tier_model.opus_window_days >= 1 && var.tier_model.opus_window_days <= 14
+    )
+    error_message = "Margins and shares are fractions (0-1], quiet_ratio < 1 < busy_ratio, opus_window_days 1-14."
+  }
 }

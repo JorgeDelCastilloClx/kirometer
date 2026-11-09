@@ -1,52 +1,69 @@
 # Each rule's query returns one row per user (or account). Grafana turns the
 # string columns into labels, so every row becomes its own alert instance,
-# and the numeric `value` column is compared against 0 (or the threshold).
+# and the single numeric `value` column is compared against the threshold.
+#
+# Reactive tier model: everyone starts the month low and is raised when actual
+# usage makes a higher tier cheaper. Usage alerts are digests (one mail per
+# rule listing everyone), delivered only inside their windows; pipeline alerts
+# go out whenever they happen.
 
 locals {
   rules = {
-    upgrade = {
-      uid         = "kiro-tier-upgrade"
-      title       = "Kiro - next subscription tier would be cheaper"
+    raise = {
+      uid         = "kiro-raise"
+      title       = "Kiro - raise before month end"
       threshold   = 0
       sql         = <<-SQL
-        SELECT user_label, account_id, subscription_tier, next_tier,
-               monthly_saving_usd AS value
-        FROM v_alert_tier_upgrade
-        ORDER BY monthly_saving_usd DESC
+        SELECT section, user_label, account_id, tier, target_tier, expected_tier,
+               credits_mtd, projected, saving_net, value
+        FROM v_alert_raise
+        ORDER BY section, value DESC
       SQL
-      labels      = { severity = "warning", team = "finops", alert_type = "tier_upgrade" }
-      summary     = "{{ $labels.user_label }} is on {{ $labels.subscription_tier }} but {{ $labels.next_tier }} would be cheaper this month (saving $${{ printf \"%.2f\" $values.B.Value }})."
-      description = "Month-to-date credit consumption has passed the break-even point for the current tier. Switching to {{ $labels.next_tier }} lowers the monthly cost at the same consumption. Talk to the user before changing anything."
+      labels      = { severity = "warning", team = "finops", digest = "raise", alert_type = "tier_raise" }
+      summary     = <<-EOT
+        {{ if eq $labels.section "1 raise now" }}{{ $labels.user_label }}: {{ $labels.tier }} -> {{ $labels.target_tier }}, {{ $labels.credits_mtd }} credits this month, saving $${{ $labels.saving_net }}{{ if ne $labels.expected_tier $labels.target_tier }} (expected {{ $labels.expected_tier }} by month end){{ end }}{{ else }}{{ $labels.user_label }}: {{ $labels.tier }}, {{ $labels.credits_mtd }} credits, projected {{ $labels.projected }} -> {{ $labels.target_tier }}{{ end }}
+      EOT
+      description = "Actual usage this month makes a higher tier cheaper for these users. An upgrade recalculates the whole month under the new tier, so any time before the reset works; batch them, and do not miss the reset."
     }
 
-    forecast = {
-      uid         = "kiro-overage-forecast"
-      title       = "Kiro - forecast month-end credit overshoot"
+    lower = {
+      uid         = "kiro-safe-to-lower"
+      title       = "Kiro - safe to lower now"
       threshold   = 0
       sql         = <<-SQL
-        SELECT user_label, account_id, subscription_tier,
-               overshoot_vs_threshold AS value
-        FROM v_alert_overage_forecast
-        ORDER BY overshoot_vs_threshold DESC
+        SELECT user_label, account_id, tier, reset_to, credits_mtd, projected, value
+        FROM v_alert_safe_to_lower
       SQL
-      labels      = { severity = "warning", team = "finops", alert_type = "overage_forecast" }
-      summary     = "{{ $labels.user_label }} ({{ $labels.subscription_tier }}) is projected to end the month {{ printf \"%.0f\" $values.B.Value }} credits past the point where upgrading would have been cheaper."
-      description = "Projection = month-to-date credits plus the average daily consumption of the last 7 days over the remaining days of the month. Thresholds: 500 credits on PRO, 1500 on PRO_PLUS, 2500 on PRO_MAX (next tier cheaper), 5000 on POWER (a second seat cheaper). The data is an indicator only; talk to the user first."
+      labels      = { severity = "info", team = "finops", digest = "lower", alert_type = "tier_lower_early" }
+      summary     = "{{ $labels.user_label }}: {{ $labels.tier }} -> {{ $labels.reset_to }} ({{ $labels.credits_mtd }} credits so far, projected {{ $labels.projected }})"
+      description = "These users' projection stays well below their tier's raise point, so the downgrade to the reset tier can be requested now. Downgrades apply from next month; the user keeps the current tier until then."
     }
 
-    downgrade = {
-      uid         = "kiro-tier-downgrade"
-      title       = "Kiro - downgrade candidate"
+    reset = {
+      uid         = "kiro-lower-before-reset"
+      title       = "Kiro - lower before reset"
       threshold   = 0
       sql         = <<-SQL
-        SELECT user_label, account_id, subscription_tier, recommended_tier, evidence,
-               monthly_saving_usd AS value
-        FROM v_alert_tier_downgrade
-        ORDER BY monthly_saving_usd DESC
+        SELECT user_label, account_id, tier, reset_to, lower, credits_mtd, credits_prev_month, value
+        FROM v_alert_reset
       SQL
-      labels      = { severity = "info", team = "finops", alert_type = "tier_downgrade" }
-      summary     = "{{ $labels.user_label }} on {{ $labels.subscription_tier }} is a downgrade candidate: {{ $labels.recommended_tier }} would save $${{ printf \"%.2f\" $values.B.Value }} per month."
-      description = "A cheaper tier would have covered both the previous calendar month and the projection for this month (evidence: {{ $labels.evidence }}). Absence, tool evaluations and one-off quiet months look the same in the data; ask the user before changing the subscription."
+      labels      = { severity = "info", team = "finops", digest = "reset", alert_type = "tier_reset" }
+      summary     = "{{ $labels.user_label }}: {{ $labels.tier }} -> {{ $labels.reset_to }} (this month {{ $labels.credits_mtd }}, last month {{ $labels.credits_prev_month }}{{ if eq $labels.lower \"safe now\" }}, may already be requested{{ end }})"
+      description = "Everyone above the reset tier for next month. Request these now so the identity provider sync completes before the reset; users lowered earlier this month are listed too, because the data cannot tell."
+    }
+
+    opus = {
+      uid         = "kiro-heavy-opus"
+      title       = "Kiro - heavy Opus use"
+      threshold   = 0
+      sql         = <<-SQL
+        SELECT user_label, account_id, model, newest_opus, superseded, opus_share,
+               messages, credits_est, window_days, value
+        FROM v_alert_heavy_opus
+      SQL
+      labels      = { severity = "info", team = "finops", digest = "opus", alert_type = "heavy_opus" }
+      summary     = "{{ $labels.user_label }}: {{ $labels.model }}, {{ $labels.opus_share }} of messages, {{ $labels.messages }} messages, ~{{ $labels.credits_est }} credits ({{ $labels.window_days }}){{ if eq $labels.superseded \"yes\" }}; superseded, {{ $labels.newest_opus }} is available{{ end }}"
+      description = "Opus is allowed; sustained use can also be a model left selected by mistake. Worth a quick check with the user. Credits per model are estimates (split by message share); usage under auto is not broken down by Kiro."
     }
 
     freshness = {
@@ -62,6 +79,8 @@ locals {
       description = "Kiro writes each day's report at 02:00 UTC the next day, so 1 day behind is normal. Check the ingest function log and the source bucket."
     }
   }
+
+  delivery_times = [{ start = var.delivery_window.start, end = var.delivery_window.end }]
 }
 
 resource "grafana_rule_group" "kiro" {
@@ -80,7 +99,7 @@ resource "grafana_rule_group" "kiro" {
       exec_err_state = "Error"
       labels         = rule.value.labels
       annotations = {
-        summary     = rule.value.summary
+        summary     = trimspace(rule.value.summary)
         description = rule.value.description
       }
 
@@ -141,15 +160,55 @@ resource "grafana_rule_group" "kiro" {
 
 # --- Delivery --------------------------------------------------------------
 
+# Digest mails: the rule's description as the intro, then one line per user
+# from the summary annotation. The raise digest prints its two sections.
+resource "grafana_message_template" "kiro" {
+  name     = "kiro"
+  template = <<-EOT
+    {{ define "kiro.subject" -}}
+    {{ .CommonLabels.alertname }}{{ if .CommonLabels.user_label }}: {{ .CommonLabels.user_label }}{{ else }}: {{ len .Alerts.Firing }} users{{ end }}
+    {{- end }}
+
+    {{ define "kiro.message" -}}
+    {{ if .Alerts.Firing -}}
+    {{ with index .Alerts.Firing 0 }}{{ .Annotations.description }}{{ end }}
+
+    {{ if eq .CommonLabels.digest "raise" -}}
+    Raise now:
+    {{ range .Alerts.Firing }}{{ if eq .Labels.section "1 raise now" }}  {{ .Annotations.summary }}
+    {{ end }}{{ end }}
+    Likely to need a raise by month end (projection, for the next batch):
+    {{ range .Alerts.Firing }}{{ if eq .Labels.section "2 likely by month end" }}  {{ .Annotations.summary }}
+    {{ end }}{{ end }}
+    {{- else -}}
+    {{ range .Alerts.Firing }}  {{ .Annotations.summary }}
+    {{ end }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+  EOT
+}
+
 resource "grafana_contact_point" "finops" {
   name = "kiro-finops"
   sns {
     topic = var.alerts_topic_arn
     # Grafana 13's SNS integration reads `topic_arn`; provider 4.49 only
     # sends `topic`, which Grafana 13 rejects. With no sigv4 block, Grafana
-    # signs with the workspace IAM role.
-    settings = { topic_arn = var.alerts_topic_arn }
+    # signs with the workspace IAM role. The message goes into the settings
+    # map for the same reason (the provider's `body` is not Grafana's
+    # `message`); the subject maps cleanly, and the provider reads it back as
+    # `subject`, so it must be set there to avoid a change on every plan.
+    subject = "{{ template \"kiro.subject\" . }}"
+    settings = {
+      topic_arn = var.alerts_topic_arn
+      message   = "{{ template \"kiro.message\" . }}"
+    }
+    # Usage digests: no mail when an item clears (e.g. after a raise).
+    disable_resolve_message = true
   }
+
+  depends_on = [grafana_message_template.kiro]
 }
 
 resource "grafana_contact_point" "ops" {
@@ -161,15 +220,30 @@ resource "grafana_contact_point" "ops" {
 }
 
 # Rules are evaluated on an interval, not on a clock schedule, so usage
-# alerts are held back and only delivered inside this window: by default
-# 07:00-07:15 UTC on the 28th of every month.
-resource "grafana_mute_timing" "report_windows" {
-  name = "kiro-report-windows"
+# alerts are held back and only delivered inside these windows (UTC by
+# default). Evaluation runs every 10 minutes, so results computed after the
+# 06:30 import are what gets delivered at 07:00.
+
+# Raise digest: weekly, and daily from month_end_daily_from_day to the end of
+# the month so nobody is left on the wrong tier at the reset.
+resource "grafana_mute_timing" "raise" {
+  name = "kiro-raise-windows"
   intervals {
-    location      = var.report_windows_timezone
-    days_of_month = var.report_days_of_month
+    location = var.delivery_timezone
+    weekdays = [var.weekly_digest_weekday]
     dynamic "times" {
-      for_each = var.report_windows
+      for_each = local.delivery_times
+      content {
+        start = times.value.start
+        end   = times.value.end
+      }
+    }
+  }
+  intervals {
+    location      = var.delivery_timezone
+    days_of_month = ["${var.month_end_daily_from_day}:31"]
+    dynamic "times" {
+      for_each = local.delivery_times
       content {
         start = times.value.start
         end   = times.value.end
@@ -178,23 +252,107 @@ resource "grafana_mute_timing" "report_windows" {
   }
 }
 
-# Replaces the workspace's root notification policy.
+# Safe to lower: the weekly digest day, from mid-month.
+resource "grafana_mute_timing" "lower" {
+  name = "kiro-lower-windows"
+  intervals {
+    location      = var.delivery_timezone
+    weekdays      = [var.weekly_digest_weekday]
+    days_of_month = ["${var.safe_to_lower_from_day}:31"]
+    dynamic "times" {
+      for_each = local.delivery_times
+      content {
+        start = times.value.start
+        end   = times.value.end
+      }
+    }
+  }
+}
+
+# Lower before reset: once a month, with lead time for the identity sync.
+resource "grafana_mute_timing" "reset" {
+  name = "kiro-reset-window"
+  intervals {
+    location      = var.delivery_timezone
+    days_of_month = [tostring(var.reset_list_day)]
+    dynamic "times" {
+      for_each = local.delivery_times
+      content {
+        start = times.value.start
+        end   = times.value.end
+      }
+    }
+  }
+}
+
+# Heavy Opus use: any day, as soon as a case is seen.
+resource "grafana_mute_timing" "daily" {
+  name = "kiro-daily-window"
+  intervals {
+    location = var.delivery_timezone
+    dynamic "times" {
+      for_each = local.delivery_times
+      content {
+        start = times.value.start
+        end   = times.value.end
+      }
+    }
+  }
+}
+
+# Replaces the workspace's root notification policy. Time intervals are not
+# inherited, so every child repeats its active_timings.
 resource "grafana_notification_policy" "root" {
   contact_point = grafana_contact_point.finops.name
   group_by      = ["alertname", "user_label"]
 
-  # Usage alerts (upgrade, overshoot, downgrade): only on the report day.
+  # One mail per rule, listing everyone. Repeat intervals are shorter than
+  # the gap between two windows, so every window resends the current list.
+  dynamic "policy" {
+    for_each = {
+      raise = { timing = grafana_mute_timing.raise.name, repeat = var.raise_repeat_interval }
+      lower = { timing = grafana_mute_timing.lower.name, repeat = var.lower_repeat_interval }
+      reset = { timing = grafana_mute_timing.reset.name, repeat = var.reset_repeat_interval }
+    }
+    content {
+      contact_point = grafana_contact_point.finops.name
+      group_by      = ["alertname"]
+      matcher {
+        label = "team"
+        match = "="
+        value = "finops"
+      }
+      matcher {
+        label = "digest"
+        match = "="
+        value = policy.key
+      }
+      active_timings  = [policy.value.timing]
+      group_wait      = "1m"
+      group_interval  = "5m" # shorter than the window, so a flush always lands inside it
+      repeat_interval = policy.value.repeat
+    }
+  }
+
+  # Heavy Opus use: one mail per user when a case starts; a reminder after
+  # opus_repeat_interval while it continues; a new mail if it starts again.
   policy {
     contact_point = grafana_contact_point.finops.name
+    group_by      = ["alertname", "user_label"]
     matcher {
       label = "team"
       match = "="
       value = "finops"
     }
-    active_timings  = [grafana_mute_timing.report_windows.name]
+    matcher {
+      label = "digest"
+      match = "="
+      value = "opus"
+    }
+    active_timings  = [grafana_mute_timing.daily.name]
     group_wait      = "1m"
-    group_interval  = "5m" # shorter than the window, so a flush always lands inside it
-    repeat_interval = var.usage_repeat_interval
+    group_interval  = "5m"
+    repeat_interval = var.opus_repeat_interval
   }
 
   # Pipeline alerts: whenever they happen.

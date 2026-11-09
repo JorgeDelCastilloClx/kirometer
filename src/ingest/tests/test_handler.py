@@ -38,3 +38,8 @@ def test_handler_wires_environment(monkeypatch):
 
     handler.lambda_handler({}, None)
     assert seen["cfg"].lookback_months == 2 and seen["cfg"].force is False
+    assert seen["cfg"].settings is None
+
+    monkeypatch.setenv("TIER_MODEL_JSON", json.dumps({"reset_tier": "PRO", "billing_discount_pct": 12.5}))
+    handler.lambda_handler({}, None)
+    assert seen["cfg"].settings == {"reset_tier": "PRO", "billing_discount_pct": 12.5}

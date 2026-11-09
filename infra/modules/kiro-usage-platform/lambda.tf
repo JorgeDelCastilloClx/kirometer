@@ -134,6 +134,7 @@ resource "aws_lambda_function" "ingest" {
       SOURCE_ACCOUNT_ID = local.source_account_id
       SOURCE_REGIONS    = join(",", local.source_regions)
       LOOKBACK_MONTHS   = tostring(var.lookback_months)
+      TIER_MODEL_JSON   = jsonencode(var.tier_model)
     }
   }
 

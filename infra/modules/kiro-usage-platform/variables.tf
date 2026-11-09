@@ -108,6 +108,12 @@ variable "lookback_months" {
   default     = 2
 }
 
+variable "tier_model" {
+  description = "Reactive tier model settings (see infra/live/variables.tf). Passed to the ingest as JSON and written to the settings table; keys not given keep their database defaults."
+  type        = any
+  default     = {}
+}
+
 variable "log_retention_days" {
   description = "CloudWatch Logs retention for the ingest function."
   type        = number
@@ -155,8 +161,9 @@ variable "db_multi_az" {
 }
 
 variable "db_backup_retention_days" {
-  type    = number
-  default = 7
+  description = "Backup retention set when the instance is created. Later changes are ignored, so an organisation backup plan can own retention and window."
+  type        = number
+  default     = 7
 }
 
 variable "db_deletion_protection" {
@@ -219,7 +226,7 @@ variable "grafana_viewer_group_ids" {
 # --- Notifications ---------------------------------------------------------
 
 variable "alert_email_subscriptions" {
-  description = "E-mail addresses for usage alerts (upgrade, overshoot, downgrade). Each must confirm the SNS subscription."
+  description = "E-mail addresses for usage alerts (raise, lower, model use). Each must confirm the SNS subscription."
   type        = list(string)
   default     = []
 }
