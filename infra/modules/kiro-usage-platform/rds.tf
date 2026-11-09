@@ -63,4 +63,12 @@ resource "aws_db_instance" "this" {
   deletion_protection       = var.db_deletion_protection
   skip_final_snapshot       = false
   final_snapshot_identifier = "${var.name_prefix}-final"
+
+  lifecycle {
+    # Retention and window are only initial values. An organisation backup
+    # plan with continuous backup (point-in-time restore) sets its own
+    # retention and window on the instance; reverting them would conflict
+    # with that plan and delete automated backups beyond the shorter period.
+    ignore_changes = [backup_retention_period, backup_window]
+  }
 }
